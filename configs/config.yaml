@@ -1,0 +1,12 @@
+# configs/config.yaml
+dataset:
+  name: "KITTI"
+  root_dir: "/root/dataset/KITTI/dataset"  # 用户需要根据自己的情况修改此路径
+  sequence_id: "00"
+
+model:
+  backbone: "resnet18"
+
+training:
+  batch_size: 4
+  epochs: 100
