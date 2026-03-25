@@ -1,33 +1,45 @@
-# main.py
-import os
-import yaml
+import logging
+import argparse
+from configs.config_loader import load_config
 from datasets.kitti_dataset import KittiDataset
-# 使用 MLLMBasedLoopDetector
 from models.mllm_based_detector import MLLMBasedLoopDetector
+from models.attribute_predictor import AttributePredictor
 
-def main():
-    CONFIG_PATH = "configs/config.yaml"
-    print(f"[INFO] Starting main program with config: {CONFIG_PATH}")
+def main(config_path: str, local_model_path: str):
+    logger = logging.getLogger(__name__)
+    logger.info("Starting MLLM-based loop closure detection with LOCAL MODEL...")
 
-    # --- 初始化 ---
-    dataset = KittiDataset(config_path=CONFIG_PATH)
-    # 使用新的基于MLLM的检测器
-    detector = MLLMBasedLoopDetector()
+    # 加载配置文件
+    config = load_config(config_path)
 
-    print("[INFO] Starting MLLM-based loop closure detection simulation...")
+    # 创建数据集实例
+    dataset = KittiDataset(config_path=config_path)
 
-    N_FRAMES_TO_PROCESS = 50  # 处理少一点，看效果
+    # 使用本地模型路径初始化
+    detector = MLLMBasedLoopDetector(dataset=dataset, local_model_path=local_model_path)
 
-    for i in range(N_FRAMES_TO_PROCESS):
-        print(f"\n--- Processing Frame {i} ---")
+    for i in range(len(dataset)):
+        logger.info(f"--- Processing Frame {i} ---")
+
         image_path, pose = dataset[i]
 
-        if i > 5:  # Wait for some history
-            is_loop, match_idx, transform = detector.detect_loop(image_path, pose)
-            if is_loop:
-                print(f"*** LOOP FOUND between frame {i} and frame {match_idx} ***\n")
+        description = AttributePredictor.predict_and_format(image_path)
 
-        detector.add_frame_to_database(image_path, pose)
+        is_loop, matched_idx = detector.detect_loop(current_frame_idx=i, current_description=description)
+
+        if is_loop:
+            print(f"[QUERY] Current description: {description}")
+            print(f"*** LOOP FOUND between frame {i} and frame {matched_idx} ***")
+
+        detector.add_to_database(description, pose)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Run MLLM-based Loop Closure Detection.')
+    parser.add_argument('--config', type=str, default='configs/config.yaml', help='Path to config file')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to local LLM model (e.g., Qwen/Qwen1.5-1.8B-Chat)')
+
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+
+    main(config_path=args.config, local_model_path=args.model_path)

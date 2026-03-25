@@ -1,0 +1,105 @@
+import logging
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class LocalMLLMInterface:
+    """
+    一个封装了与本地大型语言模型交互的接口类。
+    它负责加载模型、构造提示(prompt)并进行本地推理。
+    """
+
+    def __init__(self, model_name_or_path: str, device_map: str = "auto"):
+        """
+        初始化本地LLM接口。
+
+        Args:
+            model_name_or_path (str): 本地模型路径或HuggingFace模型ID (例如 "Qwen/Qwen1.5-1.8B-Chat")。
+            device_map (str): 设备映射，"auto"会自动分配到GPU或CPU。
+        """
+        logger.info(f"Loading local model: {model_name_or_path}")
+
+        # 加载分词器和模型
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+
+        # 对于对话模型，通常需要添加pad token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch.float16,  # 使用半精度以节省显存
+            device_map=device_map,
+            trust_remote_code=True  # 信任远程代码以加载模型
+        ).eval()  # 设置为评估模式
+
+        self.device = self.model.device
+        logger.info(f"Model loaded on device: {self.device}")
+
+    def check_loop_closure(self, query_description: str, candidate_description: str) -> tuple[bool, float]:
+        """
+        使用本地LLM判断query和candidate是否为同一地点。
+        """
+        # --- 1. 构造提示(Prompt) ---
+        # 我们可以沿用之前API版本的prompt，或者根据本地模型的特点稍作调整
+        prompt = f"""
+        You are an expert in visual place recognition. I will provide you with descriptions of two scenes captured by a camera.
+
+        Query Scene Description: "{query_description}"
+        Candidate Scene Description: "{candidate_description}"
+
+        Your task is to determine if these two scene descriptions represent the same physical location. 
+        Please analyze the scene type, key objects, their attributes (like color), and any spatial relationships mentioned.
+
+        Provide your answer in the following strict JSON format ONLY, without any additional text or explanation:
+        {{
+          "is_same_location": true/false,
+          "confidence": <a number between 0.0 and 1.0>
+        }}
+        """
+
+        try:
+            # --- 2. 对prompt进行编码 ---
+            inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+
+            # --- 3. 模型推理 ---
+            with torch.no_grad():  # 关闭梯度计算以节省内存
+                outputs = self.model.generate(
+                    inputs,
+                    max_new_tokens=150,  # 限制生成的新token数量
+                    do_sample=False,  # 使用贪心解码，使结果更稳定
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+
+            # --- 4. 解码并提取结果 ---
+            # 将生成的完整序列解码
+            full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+            # 提取prompt之后的部分，即LLM的回答
+            response_text = full_response[len(self.tokenizer.decode(inputs[0], skip_special_tokens=True)):].strip()
+
+            # --- 5. 解析LLM的响应 ---
+            # 这里需要解析模型输出的JSON字符串
+            import json
+            # 有时模型可能在JSON前后加一些无关文字，我们尝试从中提取JSON部分
+            # 这是一个简化的处理，实际中可能需要更复杂的正则表达式
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                result = json.loads(json_str)
+
+                is_loop = bool(result.get("is_same_location", False))
+                confidence = float(result.get("confidence", 0.0))
+                logger.info(f"Local MLLM evaluated pair. Is Loop: {is_loop}, Confidence: {confidence:.3f}")
+                return is_loop, confidence
+            else:
+                logger.warning(f"Could not find JSON in MLLM response: {response_text}")
+                return False, 0.0
+
+        except Exception as e:
+            logger.error(f"Error during local MLLM inference: {e}")
+            return False, 0.0
